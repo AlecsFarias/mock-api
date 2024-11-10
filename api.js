@@ -1,14 +1,77 @@
 const express = require("express");
-const { faker } = require("@faker-js/faker");
+const { faker, pl } = require("@faker-js/faker");
 const swaggerJsdoc = require("swagger-jsdoc");
 const swaggerUi = require("swagger-ui-express");
+const cors = require("cors");
+const http = require("http");
+const { Server } = require("socket.io");
 
 const app = express();
 const port = 3000;
 
+app.use(cors());
 app.use(express.json());
 
-const players = [];
+const server = http.createServer(app);
+const io = new Server(server, {
+  cors: {
+    origin: "*", // Allow requests from this origin and my frontend port = 5173
+    methods: ["GET", "POST"], // Allow these HTTP methods
+  },
+});
+
+let players = [];
+
+const updatePlayerBalance = (playerId, balance) => {
+  let socketIds = undefined;
+
+  players = players.map((player) => {
+    if (playerId !== player.id) {
+      return player;
+    }
+
+    socketIds = player.socketIds;
+
+    return {
+      ...player,
+      balance,
+    };
+  });
+
+  if (socketIds) {
+    socketIds.forEach((id) => {
+      io.to(id).emit("updateBalance", {
+        newBalance: balance,
+      });
+    });
+  }
+};
+
+const addPlayerSocketId = (token, socketId) => {
+  players = players.map((player) => {
+    if (token !== player.accessToken) {
+      return player;
+    }
+
+    return {
+      ...player,
+      socketIds: [...(player.socketIds ?? []), socketId],
+    };
+  });
+};
+
+const removePlayerSocketId = (token, socketId) => {
+  players = players.map((player) => {
+    if (token !== player.accessToken) {
+      return player;
+    }
+
+    return {
+      ...player,
+      socketIds: player.socketIds?.filter((id) => id !== socketId),
+    };
+  });
+};
 
 app.post("/register", (req, res) => {
   const { name, email, password, confirmPassword } = req.body;
@@ -84,9 +147,11 @@ app.post("/bet", (req, res) => {
   const isWin = Math.random() < 0.3;
   const betTransactionId = faker.string.uuid();
 
-  player.balance = player.balance - amount;
+  const playerNewBalance = isWin
+    ? player.balance + amount * 2
+    : player.balance - amount;
 
-  if (isWin) player.balance = player.balance + amount * 2;
+  updatePlayerBalance(player.id, playerNewBalance);
 
   player.transactions.push({
     id: betTransactionId,
@@ -114,7 +179,7 @@ app.post("/bet", (req, res) => {
   res.json({
     transactionId: betTransactionId,
     currency: "BRL",
-    balance: player.balance,
+    balance: playerNewBalance,
     winAmount: isWin ? amount * 2 : null,
   });
 });
@@ -176,8 +241,10 @@ app.delete("/my-bet/:id", (req, res) => {
   if (bet.status === "win" && player.balance < bet.amount)
     return res.status(400).json({ message: "Aposta já finalizada" });
 
-  player.balance += bet.amount;
+  const playerNewBalance = player.balance + bet.amount;
   bet.status = "canceled";
+
+  updatePlayerBalance(player.id, playerNewBalance);
 
   player.transactions.push({
     id: faker.string.uuid(),
@@ -229,6 +296,16 @@ app.get("/my-transactions", (req, res) => {
   });
 });
 
+io.on("connection", (socket) => {
+  socket.on("vinculate", (token) => {
+    addPlayerSocketId(token, socket.id);
+  });
+
+  socket.on("disconnect", () => {
+    removePlayerSocketId(socket.handshake.auth.token, socket.id);
+  });
+});
+
 app.use(
   "/docs",
   swaggerUi.serve,
@@ -246,7 +323,7 @@ app.use(
   )
 );
 
-app.listen(port, () =>
+server.listen(port, () =>
   console.log(`Listening: http://localhost:${port}! ✨👋🌎`)
 );
 
